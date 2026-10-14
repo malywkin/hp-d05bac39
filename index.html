@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Проверка связи</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 16px/1.5 -apple-system, system-ui, sans-serif; margin: 0; padding: 20px 16px 40px; max-width: 560px; }
+  h1 { font-size: 20px; margin: 0 0 8px; }
+  p { margin: 0 0 12px; }
+  #verdict { font-weight: 600; font-size: 18px; margin: 14px 0; }
+  .ok { color: #1a7f37; } .bad { color: #c62828; }
+  pre { white-space: pre-wrap; word-break: break-word; font: 13px/1.5 ui-monospace, Menlo, monospace; margin: 0 0 12px; }
+  textarea { width: 100%; box-sizing: border-box; height: 120px; font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  button { font: inherit; padding: 10px 16px; margin: 8px 0; }
+  video { width: 100%; max-width: 360px; display: block; margin: 8px 0; background: #000; }
+  small { opacity: .7; }
+</style>
+</head>
+<body>
+<h1>Проверка связи</h1>
+<p>Страница открылась. Сейчас она сама скачает несколько тестовых файлов и покажет, дошли ли они целиком. Ничего не устанавливается, личные данные не собираются. Подожди до минуты и не закрывай вкладку.</p>
+<div id="verdict">Идёт проверка…</div>
+<pre id="out"></pre>
+<video id="v" muted playsinline controls preload="none"></video>
+<div id="done" hidden>
+  <p>Нажми «Скопировать» и пришли текст ниже в чат. Если кнопка не сработала, выдели текст в окошке и скопируй вручную.</p>
+  <button id="copy" type="button">Скопировать результат</button>
+  <textarea id="txt" readonly></textarea>
+</div>
+<small>Тест связи. Файлы случайные, ничего личного на странице нет.</small>
+<script>
+(function () {
+  var q = new URLSearchParams(location.search);
+  var FAST = q.has('fast');
+  var STALL = (FAST ? 3 : 12) * 1000;      // сколько ждём без новых байт
+  var TOTAL = (FAST ? 8 : 40) * 1000;      // потолок на один файл
+  var FILES = [['p/s1.bin', 20 * 1024], ['p/s2.bin', 200 * 1024], ['p/s3.bin', 1024 * 1024], ['p/s4.bin', 2 * 1024 * 1024]];
+  var out = document.getElementById('out');
+  var lines = [], summary = [];
+
+  function log(s) { lines.push(s); out.textContent = lines.join('\n'); }
+  function sec(ms) { return (ms / 1000).toFixed(1).replace('.', ',') + ' с'; }
+  function kb(b) { return Math.round(b / 1024) + ' КБ'; }
+
+  function probe(path, size) {
+    return new Promise(function (resolve) {
+      var t0 = performance.now(), last = t0, got = 0, status = 'ok', err = '';
+      var ctl = new AbortController();
+      var timer = setInterval(function () {
+        var now = performance.now();
+        if (now - last > STALL || now - t0 > TOTAL) { status = 'stall'; ctl.abort(); }
+      }, 400);
+      function finish() {
+        clearInterval(timer);
+        if (status === 'ok' && got < size) status = 'short';
+        resolve({ path: path, size: size, got: got, ms: Math.round(performance.now() - t0), status: status, err: err });
+      }
+      fetch(path + '?r=' + Math.random().toString(36).slice(2), { cache: 'no-store', signal: ctl.signal })
+        .then(function (r) {
+          if (!r.ok) { status = 'http' + r.status; return; }
+          var rd = r.body.getReader();
+          function pump() {
+            return rd.read().then(function (x) {
+              if (x.done) return;
+              got += x.value.length; last = performance.now();
+              return pump();
+            });
+          }
+          return pump();
+        })
+        .catch(function (e) { if (status === 'ok') { status = 'error'; err = String((e && e.name) || e); } })
+        .then(finish);
+    });
+  }
+
+  function describe(r) {
+    var name = kb(r.size);
+    if (r.status === 'ok') return name + ': целиком за ' + sec(r.ms) + (r.ms > 8000 ? ' (медленно)' : '');
+    if (r.status === 'stall') return name + ': ОБРЫВ, получено ' + kb(r.got) + ' за ' + sec(r.ms);
+    if (r.status === 'short') return name + ': пришло не всё, ' + kb(r.got) + ' из ' + kb(r.size);
+    return name + ': ОШИБКА ' + r.status + ' ' + r.err;
+  }
+  function short(r) {
+    if (r.status === 'ok') return kb(r.size) + ' ok ' + sec(r.ms);
+    if (r.status === 'stall') return kb(r.size) + ' ОБРЫВ ' + kb(r.got) + '/' + kb(r.size) + ' ' + sec(r.ms);
+    return kb(r.size) + ' ' + r.status + ' ' + kb(r.got);
+  }
+
+  function videoProbe() {
+    return new Promise(function (resolve) {
+      var v = document.getElementById('v'), t0 = performance.now(), done = false;
+      function end(res) { if (done) return; done = true; res.ms = Math.round(performance.now() - t0); resolve(res); }
+      var wait = setTimeout(function () { end({ status: 'не загрузилось' }); }, TOTAL);
+      v.addEventListener('error', function () { clearTimeout(wait); end({ status: 'ошибка видео' }); });
+      v.addEventListener('loadeddata', function () {
+        clearTimeout(wait);
+        var p = v.play();
+        if (p && p.catch) p.catch(function () {});
+        setTimeout(function () {
+          end({ status: v.currentTime > 0.3 ? 'играет' : 'загрузилось, но не играет' });
+        }, FAST ? 1200 : 2500);
+      });
+      v.preload = 'auto';
+      v.src = 'p/clip.mp4?r=' + Math.random().toString(36).slice(2);
+      v.load();
+    });
+  }
+
+  function timing() {
+    var n = performance.getEntriesByType && performance.getEntriesByType('navigation')[0];
+    if (!n) return 'тайминги страницы недоступны';
+    return 'DNS ' + Math.round(n.domainLookupEnd - n.domainLookupStart) + ' мс, соединение ' +
+      Math.round(n.connectEnd - n.connectStart) + ' мс, первый байт ' + Math.round(n.responseStart - n.requestStart) + ' мс';
+  }
+
+  var tz = '';
+  try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (e) {}
+  var net = (navigator.connection && navigator.connection.effectiveType) || 'н/д';
+  var head = location.host + ' | пояс ' + tz + ' | сеть ' + net;
+  log(head);
+  log(timing());
+
+  var chain = Promise.resolve();
+  var results = [];
+  FILES.forEach(function (f) {
+    chain = chain.then(function () { return probe(f[0], f[1]); }).then(function (r) {
+      results.push(r); log(describe(r)); summary.push(short(r));
+    });
+  });
+  chain.then(function () { return videoProbe(); }).then(function (vr) {
+    log('видео: ' + vr.status + ' (' + sec(vr.ms) + ')');
+    summary.push('видео ' + vr.status);
+    var allOk = results.every(function (r) { return r.status === 'ok'; }) && vr.status === 'играет';
+    var slow = results.some(function (r) { return r.status === 'ok' && r.ms > 8000; });
+    var v = document.getElementById('verdict');
+    if (allOk && !slow) { v.textContent = 'ИТОГ: всё открылось нормально'; v.className = 'ok'; }
+    else if (allOk) { v.textContent = 'ИТОГ: открылось, но медленно'; v.className = 'bad'; }
+    else { v.textContent = 'ИТОГ: есть проблемы, см. строки выше'; v.className = 'bad'; }
+    var d = new Date();
+    var stamp = d.toLocaleString('ru-RU');
+    var text = 'ПРОБА ' + stamp + ' | ' + head + ' | ' + timing() + ' | ' + summary.join(' | ') + ' | ' + v.textContent;
+    document.getElementById('txt').value = text;
+    document.getElementById('done').hidden = false;
+    document.getElementById('copy').addEventListener('click', function () {
+      var t = document.getElementById('txt');
+      t.select();
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).catch(function () { document.execCommand('copy'); });
+      else document.execCommand('copy');
+      this.textContent = 'Скопировано';
+    });
+    window.__probeResult = text;
+  });
+})();
+</script>
+</body>
+</html>
